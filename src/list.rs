@@ -48,7 +48,7 @@ impl<T: std::cmp::PartialEq> LinkedList<T> {
         self.size += 1;
     }
     
-    /// removes the first node from the list and returns its value.
+    /// Removes the first node from the list and returns its value.
     pub fn pop(&mut self) -> Option<T> {
         /// take() replaces the actual head by None an returns it's original value
         self.head.take().map(|h| {
@@ -64,8 +64,8 @@ impl<T: std::cmp::PartialEq> LinkedList<T> {
         })
     }
 
-    /// removes the first node with value `elem`
-    /// unlike [`pop`], you can choose which element to remove.
+    /// Removes the first node with value `elem`
+    /// Unlike [`LinkedList::pop`], you can choose which element to remove.
     pub fn remove(&mut self, elem: T) -> Option<T> {
         let mut node_it = &mut self.head;
 
@@ -85,16 +85,12 @@ impl<T: std::cmp::PartialEq> LinkedList<T> {
                 self.size -= 1;
                 return Some(removed.elem);
             }
-            
             let node = node_it.as_mut().unwrap();
             node_it = &mut node.next;
-            
         }
-
         return None;
     }
 }
-
 
 #[cfg(test)]
 mod tests {

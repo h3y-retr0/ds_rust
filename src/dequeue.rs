@@ -31,6 +31,12 @@ pub struct IterMut<'a, T> {
 
 pub struct IntoIter<T>(DequeueList<T>);
 
+pub struct CursorMut<'a, T> {
+    current: Link<T>,
+    list: &'a mut DequeueList<T>,
+    index: Option<usize>,
+}
+
 impl<T> Node<T> {
     fn new(next: Link<T>, prev: Link<T>, elem: T) -> NonNull<Node<T>> {
         unsafe {
@@ -162,6 +168,14 @@ impl<T> DequeueList<T> {
             tail: self.tail,
             len: self.len,
             marker: PhantomData,
+        }
+    }
+
+    pub fn cursor_mut(&mut self) -> CursorMut<T> {
+        CursorMut { 
+            current: None, 
+            list: self, 
+            index: None 
         }
     }
 }
@@ -381,6 +395,285 @@ impl<T: Hash> Hash for DequeueList<T> {
     }
 }
 
+// DOCS COPIED FROM BOOK
+
+// A Cursor is like an iterator, except that it can freely seek back-and-forth, 
+// and can safely mutate the list during iteration. This is because the lifetime 
+// of its yielded references are tied to its own lifetime, instead of just the underlying list. 
+// This means cursors cannot yield multiple elements at once.
+
+// Cursors always rest between two elements in the list, and index in a logically circular way. 
+// To accomadate this, there is a "ghost" non-element that yields None between the head and tail of the List.
+
+// When created, cursors start between the ghost and the front of the list. 
+// That is, next will yield the front of the list, and prev will yield None. 
+// Calling prev again will yield the tail.
+
+
+impl<'a, T> CursorMut<'a, T> {
+    pub fn index(&self) -> Option<usize> {
+        self.index
+    }
+
+    pub fn move_next(&mut self) {
+        if let Some(current) = self.current {
+            unsafe {
+                self.current = (*current.as_ptr()).next;
+                if self.current.is_some() {
+                    *self.index.as_mut().unwrap() += 1;
+                } else {
+                    self.index = None;
+                }
+            }
+        } else if !self.list.is_empty() {
+            self.current = self.list.head;
+            self.index = Some(0);
+        } else {
+            // Ghost
+        }
+    }
+
+    pub fn move_prev(&mut self) {
+        if let Some(current) = self.current {
+            unsafe {
+                self.current = (*current.as_ptr()).prev;
+                if self.current.is_some() {
+                    *self.index.as_mut().unwrap() -= 1;
+                } else {
+                    self.index = None;
+                }
+            }
+        } else if !self.list.is_empty() {
+            self.current = self.list.tail;
+            self.index = Some(self.list.len - 1);
+        } else {
+            // Ghost
+        }
+    }
+
+    pub fn current(&mut self) -> Option<&mut T> {
+        unsafe { self.current.map(|node| &mut (*node.as_ptr()).elem) }
+    }
+
+    pub fn peek_next(&mut self) -> Option<&mut T> {
+        unsafe {
+            let next = if let Some(current) = self.current {
+                (*current.as_ptr()).next
+            } else {
+                self.list.head
+            };
+
+            next.map(|node| &mut (*node.as_ptr()).elem)
+        }
+    }
+
+    pub fn peek_prev(&mut self) -> Option<&mut T> {
+        unsafe {
+            let prev = if let Some(current) = self.current {
+                (*current.as_ptr()).prev
+            } else {
+                self.list.tail
+            };
+
+            prev.map(|node| &mut (*node.as_ptr()).elem)
+        }
+    }
+
+    pub fn split_before(&mut self) -> DequeueList<T> {
+        if self.current.is_none() {
+            return std::mem::replace(self.list, DequeueList::new());
+        }
+
+        unsafe {
+            let current = self.current.unwrap();
+
+            let old_len = self.list.len;
+            let old_idx = self.index.unwrap();
+            let prev = (*current.as_ptr()).prev;
+
+            let new_len = old_len - old_idx;
+            let new_head = self.current;
+            let new_tail = self.list.tail;
+            let new_idx = Some(0);
+
+            let output_len = old_len - new_len;
+            let output_head = self.list.head;
+            let output_tail = prev;
+
+            if let Some(prev) = prev {
+                (*current.as_ptr()).prev = None;
+                (*prev.as_ptr()).next = None;
+            }
+
+            self.list.len = new_len;
+            self.list.head = new_head;
+            self.list.tail = new_tail;
+            self.index = new_idx;
+
+            DequeueList {
+                head: output_head,
+                tail: output_tail,
+                len: output_len,
+                marker: PhantomData,
+            }
+        }
+    }
+
+    pub fn split_after(&mut self) -> DequeueList<T> {
+        if self.current.is_none() {
+            return std::mem::replace(self.list, DequeueList::new());
+        }
+
+        unsafe {
+            let current = self.current.unwrap();
+
+            let old_len = self.list.len;
+            let old_idx = self.index.unwrap();
+            let next = (*current.as_ptr()).next;
+
+            let new_len = old_idx + 1;
+            let new_head = self.list.head;
+            let new_tail = self.current;
+            let new_idx = Some(old_idx);
+
+            let output_len = old_len - new_len;
+            let output_head = next;
+            let output_tail = self.list.tail;
+
+            if let Some(next) = next {
+                (*current.as_ptr()).next = None;
+                (*next.as_ptr()).prev = None;
+            }
+
+            self.list.len = new_len;
+            self.list.tail = new_tail;
+            self.list.head = new_head;
+            self.index = new_idx;
+
+            DequeueList {
+                tail: output_tail,
+                head: output_head,
+                len: output_len,
+                marker: PhantomData,
+            }
+        }
+    }
+
+    pub fn splice_before(&mut self, mut input: DequeueList<T>) {
+        if input.is_empty() {
+            return;
+        }
+
+        if self.list.is_empty() {
+            *self.list = input;
+            return;
+        }
+
+        let input_head = input.head.take().unwrap();
+        let input_tail = input.tail.take().unwrap();
+
+        unsafe {
+            if let Some(current) = self.current {
+                if let Some(prev) = (*current.as_ptr()).prev {
+                    (*prev.as_ptr()).next = Some(input_head);
+                    (*input_head.as_ptr()).prev = Some(prev);
+                    (*current.as_ptr()).prev = Some(input_tail);
+                    (*input_tail.as_ptr()).next = Some(current);
+                } else{
+                    (*current.as_ptr()).prev = Some(input_tail);
+                    (*input_tail.as_ptr()).next = Some(current);
+                    self.list.head = Some(input_head);
+                }
+            } else {
+                (*self.list.tail.unwrap().as_ptr()).next = Some(input_head);
+                (*input_head.as_ptr()).prev = self.list.tail;
+                self.list.tail = Some(input_tail);
+            }
+
+            self.list.len += input.len;
+            input.len = 0;
+        }
+    }
+
+    pub fn splice_after(&mut self, mut input: DequeueList<T>) {
+        if input.is_empty() {
+            return;
+        }
+
+        if self.list.is_empty() {
+            *self.list = input;
+            return;
+        }
+
+        let input_head = input.head.take().unwrap();
+        let input_tail = input.tail.take().unwrap();
+
+        unsafe {
+            if let Some(current) = self.current {
+                if let Some(next) = (*current.as_ptr()).next {
+                    (*next.as_ptr()).prev = Some(input_tail);
+                    (*input_tail.as_ptr()).next = Some(next);
+                    (*current.as_ptr()).next = Some(input_head);
+                    (*input_head.as_ptr()).prev = Some(current);
+                } else {
+                    (*current.as_ptr()).next = Some(input_head);
+                    (*input_head.as_ptr()).prev = Some(current);
+                    self.list.tail = Some(input_tail);
+                }
+            } else {
+                (*self.list.head.unwrap().as_ptr()).prev = Some(input_tail);
+                (*input_tail.as_ptr()).next = self.list.head;
+                self.list.head = Some(input_head);
+            }
+
+            self.list.len += input.len;
+            input.len = 0;
+        }
+    }
+
+    pub fn remove_current(&mut self) -> Option<T> {
+        if self.list.is_empty() {
+            return None;
+        }
+
+        if self.current.is_none() {
+            return None;
+        }
+
+        unsafe {
+            let mut current = Box::from_raw(self.current.unwrap().as_ptr());
+
+            let value = current.elem;
+
+            if let Some(next) = current.next {
+                if let Some(prev) = current.prev {
+                    (*prev.as_ptr()).next = Some(next);
+                    (*next.as_ptr()).prev = Some(prev);
+                } else {
+                    self.list.head = Some(next);
+                    (*next.as_ptr()).prev = None;
+                }
+                self.current = Some(next);
+            } else {
+                if let Some(prev) = current.prev {
+                    self.list.tail = Some(prev);
+                    (*prev.as_ptr()).next = None;
+                } else {
+                    self.list.tail = None;
+                    self.list.head = None;
+                }
+                self.current = None;
+            }
+
+            current.next = None;
+            current.prev = None;
+
+            self.list.len -= 1;
+            
+            Some(value)
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -653,5 +946,5 @@ mod tests {
         assert_eq!(map.remove(&list2), Some("list2"));
 
         assert!(map.is_empty());
-    }
+    } 
 }
